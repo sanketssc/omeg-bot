@@ -3,22 +3,26 @@
 mod commands;
 
 use serenity::all::{
-    ActivityData, CommandInteraction, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMessage, EditInteractionResponse, Guild, Interaction, UserId,
+    ActivityData, Command, CommandInteraction, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, Guild, Interaction,
+    UserId,
 };
 use serenity::async_trait;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 
-use redis::{Commands, PubSubCommands};
+use redis::Commands;
 
 struct Handler;
 
 fn matcher(command: &CommandInteraction, redis_connection: &mut redis::Connection) -> String {
     let connecting: String = redis_connection.get("connecting").unwrap();
     let connected: String = redis_connection.get("connected").unwrap();
+    println!("Connecting: {:?}", connecting);
+    println!("Connected: {:?}", connected);
 
     let mut connecting_vec: Vec<UserId> = serde_json::from_str(&connecting).unwrap();
+    println!("Connecting vec: {:?}", connecting_vec);
     let mut connected_vec: Vec<UserId> = serde_json::from_str(&connected).unwrap();
 
     if let Some(_val) = connecting_vec.iter().find(|_id| _id == &&command.user.id) {
@@ -86,9 +90,10 @@ fn disconnect_users(user1: UserId, user2: UserId, mut redis_connection: redis::C
 fn get_redis_connection() -> Result<redis::Connection, redis::RedisError> {
     let client = redis::Client::open(
         std::env::var("REDIS_URL").expect("REDIS_URL must be set in the environment"),
+        // "redis://127.0.0.1:6379",
     )?;
     let mut con: redis::Connection = client.get_connection()?;
-    let _ = con.set("connected", "true")?;
+    let _ = con.set("con", "true")?;
     Ok(con)
 }
 
@@ -121,31 +126,6 @@ impl EventHandler for Handler {
 
             println!("Interaction received: {:?}", command);
             println!("from : {:?}", command.user.global_name.clone().unwrap());
-
-            // if command
-            //     .user
-            //     .has_role(&ctx.http, 696775407764242523, 69677885235304827)
-            //     .await
-            //     .unwrap()
-            // {
-            //     println!("User has role ");
-            // } else {
-            //     println!("User does not have role");
-            // }
-
-            // let guild_id = GuildId::new(696775407764242523);
-            // let role_id = RoleId::new(696778852353048627);
-
-            // println!(
-            //     "roles: {:?}",
-            //     guild_id
-            //         .roles(&ctx.http)
-            //         .await
-            //         .unwrap()
-            //         .get(&role_id)
-            //         .unwrap()
-            //         .name
-            // );
 
             match command.data.name.as_str() {
                 "pinga" => Some(commands::ping::run(&command.data.options())),
@@ -306,13 +286,13 @@ impl EventHandler for Handler {
 
         // let _ = Command::create_global_command(&ctx.http, commands::ping::register()).await;
 
-        // let _ = Command::create_global_command(&ctx.http, commands::start::register()).await;
+        let c1 = Command::create_global_command(&ctx.http, commands::start::register()).await;
 
-        // let _ = Command::create_global_command(&ctx.http, commands::message::register()).await;
+        let c2 = Command::create_global_command(&ctx.http, commands::message::register()).await;
 
-        // let _ = Command::create_global_command(&ctx.http, commands::leave::register()).await;
+        let c3 = Command::create_global_command(&ctx.http, commands::leave::register()).await;
 
-        // println!("I created the following global slash command: {guild_command:#?}");
+        println!("I created the following global slash command: {c1:#?} {c2:#?} {c3:#?}");
         // println!("I created the following global slash command: {guild_command2:#?}");
     }
 }
@@ -346,9 +326,11 @@ async fn main() {
         .as_mut()
         .unwrap()
         .set("connected", connected_ser);
+
     let _: Result<String, redis::RedisError> = redis_connection.as_mut().unwrap().set("con", "1");
 
     drop(redis_connection);
+
     // Configure the client with your Discord bot token in the environment.
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     // Set gateway intents, which decides what events the bot will be notified about
