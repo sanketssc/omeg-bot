@@ -1,4 +1,4 @@
-use serenity::all::{CommandInteraction, Context, CreateInteractionResponseMessage};
+use serenity::all::{CommandInteraction, Context};
 use serenity::builder::CreateCommand;
 
 #[allow(unused)]

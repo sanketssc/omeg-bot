@@ -5,6 +5,7 @@ pub fn run(_options: &[ResolvedOption]) -> String {
     "Hey, I'm alive!".to_string()
 }
 
+#[allow(unused)]
 pub fn register() -> CreateCommand {
     CreateCommand::new("pinga").description("A pinga command")
 }

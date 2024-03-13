@@ -2,10 +2,11 @@
 
 mod commands;
 
+use serde::{Deserialize, Serialize};
 use serenity::all::{
-    ActivityData, Command, CommandInteraction, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, Guild, Interaction,
-    UserId,
+    ActivityData, ChannelId, ChannelType, Command, CommandInteraction, CreateAttachment,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
+    EditInteractionResponse, Guild, Interaction, Message, UserId,
 };
 use serenity::async_trait;
 use serenity::model::gateway::Ready;
@@ -13,78 +14,175 @@ use serenity::prelude::*;
 
 use redis::Commands;
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+struct User {
+    id: UserId,
+    channel: ChannelId,
+    partner: Option<UserId>,
+    partner_channel: Option<ChannelId>,
+}
+
 struct Handler;
 
-fn matcher(command: &CommandInteraction, redis_connection: &mut redis::Connection) -> String {
-    let connecting: String = redis_connection.get("connecting").unwrap();
-    let connected: String = redis_connection.get("connected").unwrap();
+enum GenericError {
+    RedisError(redis::RedisError),
+    SerenityError(serenity::Error),
+    // SerenityJsonError(serenity::model::),
+    SerdeJsonError(serde_json::Error),
+}
+
+impl From<redis::RedisError> for GenericError {
+    fn from(error: redis::RedisError) -> Self {
+        GenericError::RedisError(error)
+    }
+}
+
+impl From<serenity::Error> for GenericError {
+    fn from(error: serenity::Error) -> Self {
+        GenericError::SerenityError(error)
+    }
+}
+
+// impl From<serenity::model::channel::DiscordJsonError> for GenericError {
+//     fn from(error: serenity::model::channel::DiscordJsonError) -> Self {
+//         GenericError::SerenityJsonError(error)
+//     }
+// }
+
+impl From<serde_json::Error> for GenericError {
+    fn from(error: serde_json::Error) -> Self {
+        GenericError::SerdeJsonError(error)
+    }
+}
+
+async fn matcher(
+    ctx: &Context,
+    command: &CommandInteraction,
+    redis_connection: &mut redis::Connection,
+) -> Result<String, GenericError> {
+    let connecting: String = redis_connection.get("connecting")?;
+    let connected: String = redis_connection.get("connected")?;
     println!("Connecting: {:?}", connecting);
     println!("Connected: {:?}", connected);
 
-    let mut connecting_vec: Vec<UserId> = serde_json::from_str(&connecting).unwrap();
+    let mut connecting_vec: Vec<User> = serde_json::from_str(&connecting)?;
     println!("Connecting vec: {:?}", connecting_vec);
-    let mut connected_vec: Vec<UserId> = serde_json::from_str(&connected).unwrap();
+    let mut connected_vec: Vec<User> = serde_json::from_str(&connected)?;
 
-    if let Some(_val) = connecting_vec.iter().find(|_id| _id == &&command.user.id) {
+    if let Some(_val) = connecting_vec.iter().find(|u| u.id == command.user.id) {
         println!("You are already in queue");
 
-        return "You are already in queue".to_string();
+        return Ok("You are already in queue".to_string());
     }
 
-    if let Some(_val) = connected_vec.iter().find(|_id| _id == &&command.user.id) {
+    if let Some(_val) = connected_vec.iter().find(|u| u.id == command.user.id) {
         println!("You are already connected");
-        return "You are already connected".to_string();
+        let msg_str = format!(
+            "You are already connected -> <#{}>",
+            _val.channel.to_string()
+        );
+        return Ok(msg_str);
     }
+
+    let x = CreateThread::new("Hello")
+        .invitable(false)
+        .kind(ChannelType::PrivateThread)
+        .auto_archive_duration(serenity::all::AutoArchiveDuration::OneHour);
+    let _res = ctx
+        .http()
+        .create_thread(command.channel_id, &x, Some("Hello"))
+        .await?;
+
+    println!("Thread created: {:?}", _res);
+    ctx.http()
+        .send_message(
+            _res.id,
+            Vec::<CreateAttachment>::new(),
+            &CreateMessage::new().content("Hello"),
+        )
+        .await?;
+    _res.id
+        .add_thread_member(&ctx.http, command.user.id)
+        .await?;
+
+    let mut user = User {
+        id: command.user.id,
+        channel: _res.id,
+        partner: None,
+        partner_channel: None,
+    };
 
     if connecting_vec.len() > 0 {
-        let free_user = connecting_vec[0];
+        let mut free_user = connecting_vec[0].clone();
         connecting_vec.remove(0);
+        free_user.partner = Some(command.user.id);
+        user.partner = Some(free_user.id);
+        free_user.partner_channel = Some(user.channel);
+        user.partner_channel = Some(free_user.channel);
+        user.channel
+            .say(&ctx.http, "You are connected to user")
+            .await?;
+        free_user
+            .channel
+            .say(&ctx.http, "You are connected to user")
+            .await?;
         connected_vec.push(free_user);
-        connected_vec.push(command.user.id);
-        let connected_ser = serde_json::to_string(&connected_vec).unwrap();
-        let connecting_ser = serde_json::to_string(&connecting_vec).unwrap();
-        let _: Result<String, redis::RedisError> = redis_connection.set("connected", connected_ser);
-        let _: Result<String, redis::RedisError> =
-            redis_connection.set("connecting", connecting_ser);
-        let _: Result<String, redis::RedisError> =
-            redis_connection.set(command.user.id.to_string(), free_user.to_string());
-        let _: Result<String, redis::RedisError> =
-            redis_connection.set(free_user.to_string(), command.user.id.to_string());
+        connected_vec.push(user);
+        let connected_ser = serde_json::to_string(&connected_vec)?;
+        let connecting_ser = serde_json::to_string(&connecting_vec)?;
+        redis_connection.set("connected", connected_ser)?;
+        redis_connection.set("connecting", connecting_ser)?;
+        redis_connection.set(command.user.id.to_string(), free_user.id.to_string())?;
+        redis_connection.set(free_user.id.to_string(), command.user.id.to_string())?;
+        redis_connection.set(free_user.channel.to_string(), user.channel.to_string())?;
+        redis_connection.set(user.channel.to_string(), free_user.channel.to_string())?;
 
-        return "You are connected".to_string();
+        let msg_str = format!("You are connected to user -> <#{}>", _res.id.to_string());
+        return Ok(msg_str);
     }
 
-    connecting_vec.push(command.user.id);
+    connecting_vec.push(user);
 
-    println!("Subscribed to user: {:?}", command.user.id);
-    let connecting_ser = serde_json::to_string(&connecting_vec).unwrap();
-    let _: Result<String, redis::RedisError> = redis_connection.set("connecting", connecting_ser);
-    "You are in queue".to_string()
+    // println!("Subscribed to user: {:?}", command.user.id);
+    let connecting_ser = serde_json::to_string(&connecting_vec)?;
+    redis_connection.set("connecting", connecting_ser)?;
+    let msg_str = format!("You can chat with your Partner here -->  <#{}>", _res.id);
+    Ok(msg_str)
 }
 
-fn get_connection_user(
-    id: UserId,
-    redis_connection: &mut redis::Connection,
-) -> Result<UserId, redis::RedisError> {
-    let conn_user: u64 = redis_connection.get(id.to_string())?;
-    Ok(UserId::new(conn_user))
-}
+// fn get_connection_user(
+//     id: UserId,
+//     redis_connection: &mut redis::Connection,
+// ) -> Result<UserId, GenericError> {
+//     let conn_user: u64 = redis_connection.get(id.to_string())?;
+//     Ok(UserId::new(conn_user))
+// }
 
-fn disconnect_users(user1: UserId, user2: UserId, mut redis_connection: redis::Connection) {
-    let _: Result<String, redis::RedisError> = redis_connection.del(user1.to_string());
-    let _: Result<String, redis::RedisError> = redis_connection.del(user2.to_string());
+async fn disconnect_users(
+    user1: UserId,
+    ctx: &Context,
+    mut redis_connection: redis::Connection,
+) -> Result<(), GenericError> {
+    let connected: String = redis_connection.get("connected")?;
+    let mut connected_vec: Vec<User> = serde_json::from_str(&connected)?;
 
-    let connected: String = redis_connection.get("connected").unwrap();
-    let mut connected_vec: Vec<UserId> = serde_json::from_str(&connected).unwrap();
-    connected_vec.retain(|user| user != &user1 && user != &user2);
-    let connected_ser = serde_json::to_string(&connected_vec).unwrap();
-    let _: Result<String, redis::RedisError> = redis_connection.set("connected", connected_ser);
+    if let Some(u) = connected_vec.iter().find(|u| u.id == user1) {
+        let user2 = u.partner.unwrap();
+        let user2_channel = u.partner_channel.unwrap();
+        let user1_channel = u.channel;
+        user2_channel.delete(&ctx.http).await?;
+        user1_channel.delete(&ctx.http).await?;
+        redis_connection.del(user1.to_string())?;
+        redis_connection.del(user2.to_string())?;
+        redis_connection.del(user1_channel.to_string())?;
+        redis_connection.del(user2_channel.to_string())?;
 
-    let connecting: String = redis_connection.get("connecting").unwrap();
-    let mut connecting_vec: Vec<UserId> = serde_json::from_str(&connecting).unwrap();
-    connecting_vec.retain(|user| user != &user1 && user != &user2);
-    let connecting_ser = serde_json::to_string(&connecting_vec).unwrap();
-    let _: Result<String, redis::RedisError> = redis_connection.set("connecting", connecting_ser);
+        connected_vec.retain(|u| u.id != user1);
+        connected_vec.retain(|u| u.id != user2);
+        let connected_ser = serde_json::to_string(&connected_vec)?;
+        redis_connection.set("connected", connected_ser)?;
+    }
+    Ok(())
 }
 
 fn get_redis_connection() -> Result<redis::Connection, redis::RedisError> {
@@ -97,166 +195,186 @@ fn get_redis_connection() -> Result<redis::Connection, redis::RedisError> {
     Ok(con)
 }
 
+#[derive(Serialize)]
+struct MapForThread;
+
+async fn try_interaction_create(
+    ctx: Context,
+    interaction: Interaction,
+) -> Result<(), GenericError> {
+    if let Interaction::Command(command) = interaction {
+        let redis_connection = get_redis_connection();
+
+        match &command.channel.clone().unwrap().kind {
+            ChannelType::PrivateThread => {
+                if command.data.name.as_str() != "leave" {
+                    command
+                        .create_response(
+                            ctx,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("You can only use /leave command in the thread")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await?;
+
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+
+        match &redis_connection {
+            Ok(_con) => {
+                println!("Connected to redis");
+            }
+            Err(e) => {
+                println!("Error connecting to redis : {:?}", e);
+                command
+                    .create_response(
+                        ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("There was some error connecting to redis"),
+                        ),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        let mut redis_connection = redis_connection?;
+
+        println!("Interaction received: {:?}", command);
+        println!("from : {:?}", command.user.global_name.clone().unwrap());
+
+        match command.data.name.as_str() {
+            "pinga" => Some(commands::ping::run(&command.data.options())),
+            "start" => {
+                println!(
+                    "Interaction received: {:?}",
+                    command.user.global_name.clone().unwrap()
+                );
+                command.defer_ephemeral(&ctx.http).await?;
+                command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().content("Starting Connection"),
+                    )
+                    .await?;
+
+                let response = matcher(&ctx, &command, &mut redis_connection).await?;
+                command
+                    .edit_response(&ctx.http, EditInteractionResponse::new().content(response))
+                    .await?;
+
+                // commands::start::run(&command, &ctx).await;
+                Some("Ok".to_string())
+            }
+            "message" => {
+                //     let message = command
+                //         .data
+                //         .options
+                //         .get(0)
+                //         .unwrap()
+                //         .value
+                //         .as_str()
+                //         .unwrap()
+                //         .to_string();
+
+                //     if let Err(_) = get_connection_user(command.user.id, &mut redis_connection) {
+                //         command
+                //             .create_response(
+                //                 &ctx.http,
+                //                 CreateInteractionResponse::Message(
+                //                     CreateInteractionResponseMessage::new().content(
+                //                         "You are currently not connected use /start to connect to user",
+                //                     ),
+                //                 ),
+                //             )
+                //             .await?;
+                //         return Ok(());
+                //     }
+                //     let user = get_connection_user(command.user.id, &mut redis_connection)?;
+                //     println!("154, {:?}", user);
+
+                //     user.create_dm_channel(&ctx.http)
+                //         .await?
+                //         .send_message(&ctx.http, CreateMessage::new().content(message))
+                //         .await?;
+
+                //     command
+                //         .create_response(
+                //             &ctx.http,
+                //             CreateInteractionResponse::Message(
+                //                 CreateInteractionResponseMessage::new()
+                //                     .content("Message sent")
+                //                     .ephemeral(true),
+                //             ),
+                //         )
+                //         .await?;
+
+                Some("Ok".to_string())
+            }
+            "leave" => {
+                // let user = command.user.id;
+
+                // if let Err(_) = get_connection_user(user, &mut redis_connection) {
+                //     command
+                //         .create_response(
+                //             &ctx.http,
+                //             CreateInteractionResponse::Message(
+                //                 CreateInteractionResponseMessage::new()
+                //                     .content("You are currently not connected"),
+                //             ),
+                //         )
+                //         .await?;
+                //     return Ok(());
+                // }
+                // let user2 = get_connection_user(user, &mut redis_connection)?;
+                disconnect_users(command.user.id, &ctx, redis_connection).await?;
+
+                // command
+                //     .create_response(
+                //         &ctx.http,
+                //         CreateInteractionResponse::Message(
+                //             CreateInteractionResponseMessage::new()
+                //                 .content("You left the conversation")
+                //                 .ephemeral(true),
+                //         ),
+                //     )
+                //     .await?;
+
+                // user.create_dm_channel(&ctx.http)
+                //     .await?
+                //     .send_message(
+                //         &ctx.http,
+                //         CreateMessage::new().content("You have left the conversation with sranger"),
+                //     )
+                //     .await?;
+
+                // user2
+                //     .create_dm_channel(&ctx.http)
+                //     .await?
+                //     .send_message(
+                //         &ctx.http,
+                //         CreateMessage::new().content("Other user left the conversation"),
+                //     )
+                //     .await?;
+
+                Some("Ok".to_string())
+            }
+            _ => Some("Unknown command".to_string()),
+        };
+    }
+    return Ok(());
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::Command(command) = interaction {
-            let redis_connection = get_redis_connection();
-            match &redis_connection {
-                Ok(_con) => {
-                    println!("Connected to redis");
-                }
-                Err(e) => {
-                    println!("Error connecting to redis : {:?}", e);
-                    command
-                        .create_response(
-                            ctx.http,
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content("There was some error connecting to redis"),
-                            ),
-                        )
-                        .await
-                        .unwrap();
-                    return;
-                }
-            }
-
-            let mut redis_connection = redis_connection.unwrap();
-
-            println!("Interaction received: {:?}", command);
-            println!("from : {:?}", command.user.global_name.clone().unwrap());
-
-            match command.data.name.as_str() {
-                "pinga" => Some(commands::ping::run(&command.data.options())),
-                "start" => {
-                    println!(
-                        "Interaction received: {:?}",
-                        command.user.global_name.clone().unwrap()
-                    );
-                    command.defer_ephemeral(&ctx.http).await.unwrap();
-                    command
-                        .edit_response(
-                            &ctx.http,
-                            EditInteractionResponse::new().content("Starting Connection"),
-                        )
-                        .await
-                        .unwrap();
-
-                    let response = matcher(&command, &mut redis_connection);
-                    command
-                        .edit_response(&ctx.http, EditInteractionResponse::new().content(response))
-                        .await
-                        .unwrap();
-
-                    // commands::start::run(&command, &ctx).await;
-                    Some("Ok".to_string())
-                }
-                "message" => {
-                    let message = command
-                        .data
-                        .options
-                        .get(0)
-                        .unwrap()
-                        .value
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-
-                    if let Err(_) = get_connection_user(command.user.id, &mut redis_connection) {
-                        command
-                            .create_response(
-                                &ctx.http,
-                                CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new().
-                                    content("You are currently not connected use /start to connect to user")),
-                            )
-                            .await
-                            .unwrap();
-                        return;
-                    }
-                    let user = get_connection_user(command.user.id, &mut redis_connection).unwrap();
-                    println!("154, {:?}", user);
-
-                    user.create_dm_channel(&ctx.http)
-                        .await
-                        .unwrap()
-                        .send_message(&ctx.http, CreateMessage::new().content(message))
-                        .await
-                        .unwrap();
-
-                    command
-                        .create_response(
-                            &ctx.http,
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content("Message sent")
-                                    .ephemeral(true),
-                            ),
-                        )
-                        .await
-                        .unwrap();
-
-                    Some("Ok".to_string())
-                }
-                "leave" => {
-                    let user = command.user.id;
-
-                    if let Err(_) = get_connection_user(user, &mut redis_connection) {
-                        command
-                            .create_response(
-                                &ctx.http,
-                                CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("You are currently not connected"),
-                                ),
-                            )
-                            .await
-                            .unwrap();
-                        return;
-                    }
-                    let user2 = get_connection_user(user, &mut redis_connection).unwrap();
-                    disconnect_users(user, user2, redis_connection);
-
-                    command
-                        .create_response(
-                            &ctx.http,
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content("You left the conversation")
-                                    .ephemeral(true),
-                            ),
-                        )
-                        .await
-                        .unwrap();
-
-                    user.create_dm_channel(&ctx.http)
-                        .await
-                        .unwrap()
-                        .send_message(
-                            &ctx.http,
-                            CreateMessage::new()
-                                .content("You have left the conversation with sranger"),
-                        )
-                        .await
-                        .unwrap();
-
-                    user2
-                        .create_dm_channel(&ctx.http)
-                        .await
-                        .unwrap()
-                        .send_message(
-                            &ctx.http,
-                            CreateMessage::new().content("Other user left the conversation"),
-                        )
-                        .await
-                        .unwrap();
-
-                    Some("Ok".to_string())
-                }
-                _ => Some("Unknown command".to_string()),
-            };
-        }
+        let _res = try_interaction_create(ctx, interaction).await;
     }
     async fn guild_create(&self, _ctx: Context, guild: Guild, is_new: Option<bool>) {
         if is_new.unwrap() {
@@ -265,6 +383,39 @@ impl EventHandler for Handler {
             println!("Guild ID: {}", guild.id);
             println!("---------------------");
         }
+    }
+    async fn message(&self, ctx: Context, msg: Message) {
+        let chan_id = msg.channel_id;
+
+        let target_chan: String = get_redis_connection()
+            .unwrap()
+            .get(chan_id.to_string())
+            .unwrap();
+        println!("Target channel: {:?}", target_chan);
+        let target_chan_id = ChannelId::from(target_chan.parse::<u64>().unwrap());
+        let is_bot = msg.author.bot;
+        if !is_bot {
+            target_chan_id.say(&ctx.http, msg.content).await.unwrap();
+        }
+        // let atc = msg.attachments.first().unwrap();
+
+        // msg.channel_id
+        //     .send_files(
+        //         &ctx.http,
+        //         CreateAttachment::url(&ctx, &atc.url).await,
+        //         CreateMessage::new().content("Images"),
+        //     )
+        //     .await
+        //     .unwrap();
+        // if msg.content == "!ping" {
+        //     msg.reply(&ctx.http, "Sent".to_string()).await.unwrap();
+        //     // Sending a message can fail, due to a network error, an authentication error, or lack
+        //     // of permissions to post in the channel, so log to stdout when some error happens,
+        //     // with a description of it.
+        //     if let Err(why) = msg.channel_id.say(&ctx.http, "Pong!").await {
+        //         println!("Error sending message: {why:?}");
+        //     }
+        // }
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
