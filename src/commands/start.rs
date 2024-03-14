@@ -1,4 +1,4 @@
-use serenity::all::{CommandInteraction, Context};
+use serenity::all::{CommandInteraction, CommandOptionType, Context, CreateCommandOption};
 use serenity::builder::CreateCommand;
 
 #[allow(unused)]
@@ -16,5 +16,12 @@ pub async fn run(command: &CommandInteraction, ctx: &Context) -> String {
 }
 
 pub fn register() -> CreateCommand {
-    CreateCommand::new("start").description("Start convesation with random person.")
+    CreateCommand::new("start")
+        .description("Start convesation with random person.")
+        .set_options(vec![CreateCommandOption::new(
+            CommandOptionType::String,
+            "interest",
+            "Interest of the person",
+        )
+        .required(true)])
 }

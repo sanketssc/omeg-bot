@@ -24,6 +24,7 @@ struct User {
 
 struct Handler;
 
+#[derive(Debug)]
 enum GenericError {
     RedisError(redis::RedisError),
     SerenityError(serenity::Error),
@@ -111,6 +112,9 @@ async fn matcher(
         partner: None,
         partner_channel: None,
     };
+    _res.id
+        .say(&ctx.http, "Waiting for user to connect")
+        .await?;
 
     if connecting_vec.len() > 0 {
         let mut free_user = connecting_vec[0].clone();
@@ -126,6 +130,7 @@ async fn matcher(
             .channel
             .say(&ctx.http, "You are connected to user")
             .await?;
+
         connected_vec.push(free_user);
         connected_vec.push(user);
         let connected_ser = serde_json::to_string(&connected_vec)?;
@@ -264,10 +269,27 @@ async fn try_interaction_create(
                     )
                     .await?;
 
-                let response = matcher(&ctx, &command, &mut redis_connection).await?;
-                command
-                    .edit_response(&ctx.http, EditInteractionResponse::new().content(response))
-                    .await?;
+                let response = matcher(&ctx, &command, &mut redis_connection).await;
+
+                match response {
+                    Ok(msg) => {
+                        command
+                            .edit_response(&ctx.http, EditInteractionResponse::new().content(msg))
+                            .await?;
+                    }
+                    Err(e) => {
+                        println!("Error: {:?}", e);
+                        command
+                            .edit_response(
+                                &ctx.http,
+                                EditInteractionResponse::new().content("Some error occured"),
+                            )
+                            .await?;
+                    }
+                }
+                // command
+                //     .edit_response(&ctx.http, EditInteractionResponse::new().content(response))
+                //     .await?;
 
                 // commands::start::run(&command, &ctx).await;
                 Some("Ok".to_string())
@@ -387,16 +409,70 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         let chan_id = msg.channel_id;
 
-        let target_chan: String = get_redis_connection()
-            .unwrap()
-            .get(chan_id.to_string())
-            .unwrap();
-        println!("Target channel: {:?}", target_chan);
-        let target_chan_id = ChannelId::from(target_chan.parse::<u64>().unwrap());
-        let is_bot = msg.author.bot;
-        if !is_bot {
-            target_chan_id.say(&ctx.http, msg.content).await.unwrap();
+        // //get channel kind
+        // let kind = msg
+        //     .guild_id
+        //     .unwrap()
+        //     .channels(&ctx.http)
+        //     .await
+        //     .unwrap()
+        //     .get(&chan_id)
+        //     .unwrap()
+        //     .kind;
+        // println!("Channel kind: {:?}", kind);
+        let atch = &msg.attachments;
+        if atch.len() > 0 {
+            msg.delete(&ctx.http).await.unwrap();
+            chan_id
+                .say(
+                    &ctx.http,
+                    "Attachments are not allowed\n Premium comming soon!~",
+                )
+                .await
+                .unwrap();
+            return;
         }
+        let stckr = &msg.sticker_items;
+        if stckr.len() > 0 {
+            msg.delete(&ctx.http).await.unwrap();
+            chan_id
+                .say(
+                    &ctx.http,
+                    "Stickers are not allowed\n Premium comming soon!~",
+                )
+                .await
+                .unwrap();
+            return;
+        }
+
+        let cha = msg.channel(&ctx.http).await.unwrap();
+        let kind = cha.guild().unwrap().kind;
+        let name = msg.channel_id.name(&ctx.http).await.unwrap();
+        println!("Channel name: {:?}", name);
+        println!("Channel kind: {:?}", kind);
+        match kind {
+            ChannelType::PrivateThread => {
+                let is_bot = msg.author.bot;
+                if !is_bot {
+                    let target_chan: Result<String, redis::RedisError> =
+                        get_redis_connection().unwrap().get(chan_id.to_string());
+
+                    match target_chan {
+                        Ok(target_chan) => {
+                            println!("Target channel: {:?}", target_chan);
+                            let target_chan_id =
+                                ChannelId::from(target_chan.parse::<u64>().unwrap());
+                            target_chan_id.say(&ctx.http, msg.content).await.unwrap();
+                        }
+                        Err(e) => {
+                            println!("Error: {:?}", e);
+                        }
+                    };
+                }
+            }
+            _ => {}
+        }
+
         // let atc = msg.attachments.first().unwrap();
 
         // msg.channel_id
@@ -488,7 +564,8 @@ async fn main() {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
-        | GatewayIntents::GUILDS;
+        | GatewayIntents::GUILDS
+        | GatewayIntents::all();
 
     // Create a new instance of the Client, logging in as a bot. This will automatically prepend
     // your bot token with "Bot ", which is a requirement by Discord for bot users.
