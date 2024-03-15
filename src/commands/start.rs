@@ -18,10 +18,24 @@ pub async fn run(command: &CommandInteraction, ctx: &Context) -> String {
 pub fn register() -> CreateCommand {
     CreateCommand::new("start")
         .description("Start convesation with random person.")
-        .set_options(vec![CreateCommandOption::new(
-            CommandOptionType::String,
-            "interest",
-            "Interest of the person",
-        )
-        .required(true)])
+        .set_options(vec![
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "interest",
+                "Interest of the person seperated by comma",
+            )
+            .required(false),
+            CreateCommandOption::new(
+                CommandOptionType::Integer,
+                "wait",
+                "Time to wait before atleast 1 interest match in seconds\n Default is 10 seconds",
+            )
+            .required(false),
+            CreateCommandOption::new(
+                CommandOptionType::Boolean,
+                "anyone",
+                "If true, match with anyone irrespective of interest",
+            )
+            .required(false),
+        ])
 }

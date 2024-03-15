@@ -4,20 +4,23 @@ mod commands;
 
 use serde::{Deserialize, Serialize};
 use serenity::all::{
-    ActivityData, ChannelId, ChannelType, Command, CommandInteraction, CreateAttachment,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
-    EditInteractionResponse, Guild, Interaction, Message, UserId,
+    ActivityData, ButtonStyle, ChannelId, ChannelType, Command, CommandInteraction,
+    CreateAttachment, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateMessage, CreateThread, EditInteractionResponse, Guild, Interaction, Message,
+    ResolvedValue, UserId,
 };
 use serenity::async_trait;
+use serenity::futures::StreamExt;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 
 use redis::Commands;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct User {
     id: UserId,
     channel: ChannelId,
+    interests: Vec<String>,
     partner: Option<UserId>,
     partner_channel: Option<ChannelId>,
 }
@@ -79,7 +82,12 @@ async fn matcher(
         return Ok(msg_str);
     }
 
-    let x = CreateThread::new("Hello")
+    let thread_name = format!(
+        "{}{}",
+        command.user.id.to_string(),
+        command.user.global_name.clone().unwrap()
+    );
+    let x = CreateThread::new(thread_name)
         .invitable(false)
         .kind(ChannelType::PrivateThread)
         .auto_archive_duration(serenity::all::AutoArchiveDuration::OneHour);
@@ -100,9 +108,25 @@ async fn matcher(
         .add_thread_member(&ctx.http, command.user.id)
         .await?;
 
+    // println!("interest: {:?}", command.data.options);
+
+    println!("Interests: {:?}", command.data.options);
+    let insts = match command.data.options.len() {
+        0 => vec![],
+        _ => match command.data.options()[0].value.clone() {
+            ResolvedValue::String(interest) => interest
+                .split(",")
+                .map(|x| x.trim().to_string())
+                .collect::<Vec<_>>(),
+            _ => vec![],
+        },
+    };
+    // println!("Interests: {:?}", insts);
+
     let mut user = User {
         id: command.user.id,
         channel: _res.id,
+        interests: insts,
         partner: None,
         partner_channel: None,
     };
@@ -111,6 +135,7 @@ async fn matcher(
         .await?;
 
     if connecting_vec.len() > 0 {
+        connecting_vec.sort_by(|a, b| b.interests.len().cmp(&a.interests.len()));
         let mut free_user = connecting_vec[0].clone();
         connecting_vec.remove(0);
         free_user.partner = Some(command.user.id);
@@ -125,8 +150,8 @@ async fn matcher(
             .say(&ctx.http, "You are connected to user")
             .await?;
 
-        connected_vec.push(free_user);
-        connected_vec.push(user);
+        connected_vec.push(free_user.clone());
+        connected_vec.push(user.clone());
         let connected_ser = serde_json::to_string(&connected_vec)?;
         let connecting_ser = serde_json::to_string(&connecting_vec)?;
         redis_connection.set("connected", connected_ser)?;
@@ -152,7 +177,7 @@ async fn matcher(
 async fn disconnect_users(
     user1: UserId,
     ctx: &Context,
-    mut redis_connection: redis::Connection,
+    redis_connection: &mut redis::Connection,
 ) -> Result<(), GenericError> {
     let connected: String = redis_connection.get("connected")?;
     let mut connected_vec: Vec<User> = serde_json::from_str(&connected)?;
@@ -174,6 +199,33 @@ async fn disconnect_users(
         redis_connection.set("connected", connected_ser)?;
     }
     Ok(())
+}
+
+async fn cancel_wait(
+    ctx: &Context,
+    command: &CommandInteraction,
+    redis_connection: &mut redis::Connection,
+) -> Result<String, GenericError> {
+    let connecting: String = redis_connection.get("connecting")?;
+    let mut connecting_vec: Vec<User> = serde_json::from_str(&connecting)?;
+    let connected: String = redis_connection.get("connected")?;
+    let connected_vec: Vec<User> = serde_json::from_str(&connected)?;
+
+    if let Some(u) = connecting_vec.iter().find(|u| u.id == command.user.id) {
+        let user1_channel = u.channel;
+        user1_channel.delete(&ctx.http).await?;
+        connecting_vec.retain(|u| u.id != command.user.id);
+        let connecting_ser = serde_json::to_string(&connecting_vec)?;
+        redis_connection.set("connecting", connecting_ser)?;
+        Ok("Successfully cancelled the request".to_string())
+    } else if let Some(u) = connected_vec.iter().find(|u| u.id == command.user.id) {
+        println!("User not found in connecting");
+        disconnect_users(u.id, ctx, redis_connection).await?;
+        Ok("Successfully cancelled the request".to_string())
+    } else {
+        //replace /start with command id of start command
+        Ok("You are not in queue. \n Use /start to connect to stranger".to_string())
+    }
 }
 
 fn get_redis_connection() -> Result<redis::Connection, redis::RedisError> {
@@ -242,6 +294,20 @@ async fn try_interaction_create(
 
         match command.data.name.as_str() {
             "pinga" => Some(commands::ping::run(&command.data.options())),
+            "cancel" => {
+                let res = cancel_wait(&ctx, &command, &mut redis_connection).await?;
+                command
+                    .create_response(
+                        ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(res)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await?;
+                return Ok(());
+            }
             "start" => {
                 println!(
                     "Interaction received: {:?}",
@@ -259,9 +325,53 @@ async fn try_interaction_create(
 
                 match response {
                     Ok(msg) => {
-                        command
-                            .edit_response(&ctx.http, EditInteractionResponse::new().content(msg))
+                        let x = command
+                            .edit_response(
+                                &ctx.http,
+                                EditInteractionResponse::new().content(msg).button(
+                                    CreateButton::new("cancel")
+                                        .style(ButtonStyle::Danger)
+                                        .label("Cancel"),
+                                ),
+                            )
                             .await?;
+
+                        let mut interaction_stream = x.await_component_interaction(&ctx).stream();
+
+                        while let Some(interaction) = interaction_stream.next().await {
+                            match interaction.data.custom_id.as_str() {
+                                "cancel" => {
+                                    cancel_wait(&ctx, &command, &mut redis_connection).await?;
+                                    command
+                                        .edit_response(
+                                            &ctx.http,
+                                            EditInteractionResponse::new().content("Cancelled"),
+                                        )
+                                        .await?;
+                                    interaction
+                                        .create_response(
+                                            &ctx.http,
+                                            CreateInteractionResponse::UpdateMessage(
+                                                CreateInteractionResponseMessage::new()
+                                                    .content("Successfully cancelled the request"),
+                                            ),
+                                        )
+                                        .await?;
+                                    interaction.delete_response(&ctx.http).await?;
+
+                                    break;
+                                }
+                                _ => {
+                                    command
+                                        .edit_response(
+                                            &ctx.http,
+                                            EditInteractionResponse::new()
+                                                .content("Unknown command"),
+                                        )
+                                        .await?;
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         println!("Error: {:?}", e);
@@ -276,7 +386,7 @@ async fn try_interaction_create(
                 Some("Ok".to_string())
             }
             "leave" => {
-                disconnect_users(command.user.id, &ctx, redis_connection).await?;
+                disconnect_users(command.user.id, &ctx, &mut redis_connection).await?;
 
                 Some("Ok".to_string())
             }
@@ -300,6 +410,21 @@ impl EventHandler for Handler {
         }
     }
     async fn message(&self, ctx: Context, msg: Message) {
+        let is_bot = msg.author.bot;
+        if is_bot {
+            return;
+        }
+        let thread_name = format!(
+            "{}{}",
+            msg.author.id.to_string(),
+            msg.author.global_name.clone().unwrap()
+        );
+        let name = msg.channel_id.name(&ctx.http).await.unwrap();
+
+        if thread_name != name {
+            return;
+        }
+
         let chan_id = msg.channel_id;
 
         let atch = &msg.attachments;
@@ -329,28 +454,31 @@ impl EventHandler for Handler {
 
         let cha = msg.channel(&ctx.http).await.unwrap();
         let kind = cha.guild().unwrap().kind;
-        let name = msg.channel_id.name(&ctx.http).await.unwrap();
-        println!("Channel name: {:?}", name);
-        println!("Channel kind: {:?}", kind);
         match kind {
             ChannelType::PrivateThread => {
-                let is_bot = msg.author.bot;
-                if !is_bot {
-                    let target_chan: Result<String, redis::RedisError> =
-                        get_redis_connection().unwrap().get(chan_id.to_string());
+                println!("Thread name:  {}", thread_name);
 
-                    match target_chan {
-                        Ok(target_chan) => {
-                            println!("Target channel: {:?}", target_chan);
-                            let target_chan_id =
-                                ChannelId::from(target_chan.parse::<u64>().unwrap());
-                            target_chan_id.say(&ctx.http, msg.content).await.unwrap();
-                        }
-                        Err(e) => {
-                            println!("Error: {:?}", e);
-                        }
-                    };
-                }
+                let target_chan: Result<String, redis::RedisError> =
+                    get_redis_connection().unwrap().get(chan_id.to_string());
+
+                match target_chan {
+                    Ok(target_chan) => {
+                        println!("Target channel: {:?}", target_chan);
+                        let target_chan_id = ChannelId::from(target_chan.parse::<u64>().unwrap());
+                        target_chan_id.say(&ctx.http, msg.content).await.unwrap();
+                    }
+                    Err(e) => {
+                        println!("Error: {:?}", e);
+                        chan_id
+                            .say(
+                                &ctx.http,
+                                "You are not connected to anyone Please wait until someone connect",
+                            )
+                            .await
+                            .unwrap();
+                        msg.delete(&ctx.http).await.unwrap();
+                    }
+                };
             }
             _ => {}
         }
@@ -380,6 +508,10 @@ impl EventHandler for Handler {
             .unwrap();
 
         Command::create_global_command(&ctx.http, commands::leave::register())
+            .await
+            .unwrap();
+
+        Command::create_global_command(&ctx.http, commands::cancel::register())
             .await
             .unwrap();
 
