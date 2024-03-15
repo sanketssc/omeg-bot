@@ -44,12 +44,6 @@ impl From<serenity::Error> for GenericError {
     }
 }
 
-// impl From<serenity::model::channel::DiscordJsonError> for GenericError {
-//     fn from(error: serenity::model::channel::DiscordJsonError) -> Self {
-//         GenericError::SerenityJsonError(error)
-//     }
-// }
-
 impl From<serde_json::Error> for GenericError {
     fn from(error: serde_json::Error) -> Self {
         GenericError::SerdeJsonError(error)
@@ -154,14 +148,6 @@ async fn matcher(
     let msg_str = format!("You can chat with your Partner here -->  <#{}>", _res.id);
     Ok(msg_str)
 }
-
-// fn get_connection_user(
-//     id: UserId,
-//     redis_connection: &mut redis::Connection,
-// ) -> Result<UserId, GenericError> {
-//     let conn_user: u64 = redis_connection.get(id.to_string())?;
-//     Ok(UserId::new(conn_user))
-// }
 
 async fn disconnect_users(
     user1: UserId,
@@ -287,103 +273,10 @@ async fn try_interaction_create(
                             .await?;
                     }
                 }
-                // command
-                //     .edit_response(&ctx.http, EditInteractionResponse::new().content(response))
-                //     .await?;
-
-                // commands::start::run(&command, &ctx).await;
-                Some("Ok".to_string())
-            }
-            "message" => {
-                //     let message = command
-                //         .data
-                //         .options
-                //         .get(0)
-                //         .unwrap()
-                //         .value
-                //         .as_str()
-                //         .unwrap()
-                //         .to_string();
-
-                //     if let Err(_) = get_connection_user(command.user.id, &mut redis_connection) {
-                //         command
-                //             .create_response(
-                //                 &ctx.http,
-                //                 CreateInteractionResponse::Message(
-                //                     CreateInteractionResponseMessage::new().content(
-                //                         "You are currently not connected use /start to connect to user",
-                //                     ),
-                //                 ),
-                //             )
-                //             .await?;
-                //         return Ok(());
-                //     }
-                //     let user = get_connection_user(command.user.id, &mut redis_connection)?;
-                //     println!("154, {:?}", user);
-
-                //     user.create_dm_channel(&ctx.http)
-                //         .await?
-                //         .send_message(&ctx.http, CreateMessage::new().content(message))
-                //         .await?;
-
-                //     command
-                //         .create_response(
-                //             &ctx.http,
-                //             CreateInteractionResponse::Message(
-                //                 CreateInteractionResponseMessage::new()
-                //                     .content("Message sent")
-                //                     .ephemeral(true),
-                //             ),
-                //         )
-                //         .await?;
-
                 Some("Ok".to_string())
             }
             "leave" => {
-                // let user = command.user.id;
-
-                // if let Err(_) = get_connection_user(user, &mut redis_connection) {
-                //     command
-                //         .create_response(
-                //             &ctx.http,
-                //             CreateInteractionResponse::Message(
-                //                 CreateInteractionResponseMessage::new()
-                //                     .content("You are currently not connected"),
-                //             ),
-                //         )
-                //         .await?;
-                //     return Ok(());
-                // }
-                // let user2 = get_connection_user(user, &mut redis_connection)?;
                 disconnect_users(command.user.id, &ctx, redis_connection).await?;
-
-                // command
-                //     .create_response(
-                //         &ctx.http,
-                //         CreateInteractionResponse::Message(
-                //             CreateInteractionResponseMessage::new()
-                //                 .content("You left the conversation")
-                //                 .ephemeral(true),
-                //         ),
-                //     )
-                //     .await?;
-
-                // user.create_dm_channel(&ctx.http)
-                //     .await?
-                //     .send_message(
-                //         &ctx.http,
-                //         CreateMessage::new().content("You have left the conversation with sranger"),
-                //     )
-                //     .await?;
-
-                // user2
-                //     .create_dm_channel(&ctx.http)
-                //     .await?
-                //     .send_message(
-                //         &ctx.http,
-                //         CreateMessage::new().content("Other user left the conversation"),
-                //     )
-                //     .await?;
 
                 Some("Ok".to_string())
             }
@@ -409,17 +302,6 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         let chan_id = msg.channel_id;
 
-        // //get channel kind
-        // let kind = msg
-        //     .guild_id
-        //     .unwrap()
-        //     .channels(&ctx.http)
-        //     .await
-        //     .unwrap()
-        //     .get(&chan_id)
-        //     .unwrap()
-        //     .kind;
-        // println!("Channel kind: {:?}", kind);
         let atch = &msg.attachments;
         if atch.len() > 0 {
             msg.delete(&ctx.http).await.unwrap();
@@ -472,26 +354,6 @@ impl EventHandler for Handler {
             }
             _ => {}
         }
-
-        // let atc = msg.attachments.first().unwrap();
-
-        // msg.channel_id
-        //     .send_files(
-        //         &ctx.http,
-        //         CreateAttachment::url(&ctx, &atc.url).await,
-        //         CreateMessage::new().content("Images"),
-        //     )
-        //     .await
-        //     .unwrap();
-        // if msg.content == "!ping" {
-        //     msg.reply(&ctx.http, "Sent".to_string()).await.unwrap();
-        //     // Sending a message can fail, due to a network error, an authentication error, or lack
-        //     // of permissions to post in the channel, so log to stdout when some error happens,
-        //     // with a description of it.
-        //     if let Err(why) = msg.channel_id.say(&ctx.http, "Pong!").await {
-        //         println!("Error sending message: {why:?}");
-        //     }
-        // }
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
