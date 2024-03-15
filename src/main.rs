@@ -375,13 +375,15 @@ impl EventHandler for Handler {
 
         // let _ = Command::create_global_command(&ctx.http, commands::ping::register()).await;
 
-        let c1 = Command::create_global_command(&ctx.http, commands::start::register()).await;
+        Command::create_global_command(&ctx.http, commands::start::register())
+            .await
+            .unwrap();
 
-        let c2 = Command::create_global_command(&ctx.http, commands::message::register()).await;
+        Command::create_global_command(&ctx.http, commands::leave::register())
+            .await
+            .unwrap();
 
-        let c3 = Command::create_global_command(&ctx.http, commands::leave::register()).await;
-
-        println!("I created the following global slash command: {c1:#?} {c2:#?} {c3:#?}");
+        // println!("I created the following global slash command: {c1:#?} {c2:#?} {c3:#?}");
         // println!("I created the following global slash command: {guild_command2:#?}");
     }
 }
