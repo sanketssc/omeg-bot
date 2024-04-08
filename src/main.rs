@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serenity::all::{
     ActivityData, ButtonStyle, ChannelId, ChannelType, Command, CommandInteraction,
     CreateAttachment, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMessage, CreateThread, EditInteractionResponse, Guild, Interaction, Message,
-    ResolvedValue, UserId,
+    CreateMessage, CreateThread, EditInteractionResponse, Guild, GuildChannel, Interaction,
+    Message, PartialGuildChannel, ResolvedValue, UserId,
 };
 use serenity::async_trait;
 use serenity::futures::StreamExt;
@@ -396,8 +396,111 @@ async fn try_interaction_create(
     return Ok(());
 }
 
+async fn redis_delete(
+    key: &str,
+    redis_connection: &mut redis::Connection,
+) -> Result<(), GenericError> {
+    let _: () = redis_connection.del(key)?;
+    Ok(())
+}
+
+async fn redis_set(
+    key: &str,
+    value: &str,
+    redis_connection: &mut redis::Connection,
+) -> Result<(), GenericError> {
+    let _: () = redis_connection.set(key, value)?;
+    Ok(())
+}
 #[async_trait]
 impl EventHandler for Handler {
+    // async fn channel_delete(
+    //     &self,
+    //     ctx: Context,
+    //     channel: GuildChannel,
+    //     messages: Option<Vec<Message>>,
+    // ) {
+    //     println!("Channel deleted: {:?}", channel.id);
+    //     // let redis_connection = get_redis_connection().unwrap();
+    //     // let connected: String = redis_connection.get("connected").unwrap();
+    //     // let mut connected_vec: Vec<User> = serde_json::from_str(&connected).unwrap();
+    //     // connected_vec.retain(|u| u.channel != channel);
+    //     // let connected_ser = serde_json::to_string(&connected_vec).unwrap();
+    //     // redis_connection.set("connected", connected_ser).unwrap();
+    // }
+    async fn thread_delete(
+        &self,
+        ctx: Context,
+        partial_channel: PartialGuildChannel,
+        _channel: Option<GuildChannel>,
+    ) {
+        println!("Thread deleted: {:?}", partial_channel.id);
+        let mut redis_connection = get_redis_connection().unwrap();
+        let connected: String = redis_connection.get("connected").unwrap();
+        let connecting: String = redis_connection.get("connecting").unwrap();
+
+        let mut connecting_vec: Vec<User> = serde_json::from_str(&connecting).unwrap();
+
+        let mut connected_vec: Vec<User> = serde_json::from_str(&connected).unwrap();
+        let user = if let Some(user) = connected_vec
+            .iter()
+            .find(|u| u.channel == partial_channel.id)
+        {
+            user.clone()
+        } else {
+            if let Some(user) = connecting_vec
+                .clone()
+                .iter()
+                .find(|u| u.channel == partial_channel.id)
+            {
+                connecting_vec.retain(|u| u.channel != user.channel);
+                let connecting_ser = serde_json::to_string(&connecting_vec).unwrap();
+                redis_set("connecting", &connecting_ser, &mut redis_connection)
+                    .await
+                    .unwrap();
+                return;
+            } else {
+                return;
+            };
+        };
+        let thread_id = user.channel;
+        let partner_thread_id = user.partner_channel.unwrap();
+
+        let res = ctx
+            .http()
+            .delete_channel(partner_thread_id, Some("Partner Left the chat"))
+            .await;
+        match res {
+            Ok(_) => {
+                println!("Thread deleted successfully");
+            }
+            Err(_) => {
+                // println!("Error deleting thread: {:?}", e);
+                return;
+            }
+        }
+        redis_delete(&user.id.to_string(), &mut redis_connection)
+            .await
+            .unwrap();
+        redis_delete(&user.partner.unwrap().to_string(), &mut redis_connection)
+            .await
+            .unwrap();
+        redis_delete(&thread_id.to_string(), &mut redis_connection)
+            .await
+            .unwrap();
+        redis_delete(&partner_thread_id.to_string(), &mut redis_connection)
+            .await
+            .unwrap();
+
+        connected_vec.retain(|u| u.channel != partner_thread_id);
+        connected_vec.retain(|u| u.channel != thread_id);
+
+        let connected_ser = serde_json::to_string(&connected_vec).unwrap();
+        redis_set("connected", &connected_ser, &mut redis_connection)
+            .await
+            .unwrap();
+    }
+
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         let _res = try_interaction_create(ctx, interaction).await;
     }
